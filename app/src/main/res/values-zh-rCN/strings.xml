@@ -1,11 +1,9 @@
 <resources>
-    <string name="app_name" translatable="false">geminiAssist</string>
+    <string name="app_name" translatable="false">Gemini Enhanced</string>
     <string name="error_copy">请手动选择并复制文本</string>
-    <!-- StarDialog -->
+    <!-- Dialog buttons -->
     <string name="dialog_OK_button">确定</string>
     <string name="dialog_NO_button">否</string>
-    <string name="dialog_Later_button">稍后</string>
-    <string name="dialog_StarOnGitHub">您喜欢这个应用吗？请在GitHub上给它一个星星~</string>
     <string name="download">下载开始：</string>
     <string name="download_saved">已保存到下载：</string>
     <string name="download_failed">下载失败</string>

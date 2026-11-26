@@ -1,13 +1,13 @@
 name: Android CI (Build Debug APK)
 
-# geminiAssist CI/CD
+# Gemini Enhanced CI
 
 env:
   # The name of the main module repository
   main_project_module: app
 
   # The name of the Play Store
-  playstore_name: AcideFluorhydrique
+  playstore_name: GeminiEnhanced
 
 on:
   # Triggers the workflow on push or pull request events but only for default and protected branches
@@ -57,8 +57,8 @@ jobs:
 
       # Upload Artifact Build
       # Noted For Output [main_project_module]/build/outputs/apk/debug/
-      - name: Upload APK Debug - geminiAssist
+      - name: Upload APK Debug - Gemini Enhanced
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.date_today }} - ${{ env.playstore_name }} - geminiAssist - APK(s) debug generated
+          name: ${{ env.date_today }} - ${{ env.playstore_name }} - APK(s) debug generated
           path: ${{ env.main_project_module }}/build/outputs/apk/debug/

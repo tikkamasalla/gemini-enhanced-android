@@ -5,12 +5,17 @@
 # For more details, see
 #   http://developer.android.com/guide/developing/tools/proguard.html
 
-# If your project uses WebView with JS, uncomment the following
-# and specify the fully qualified class name to the JavaScript interface
-# class:
-#-keepclassmembers class fqcn.of.javascript.interface.for.webview {
-#   public *;
-#}
+# Keep every @JavascriptInterface method (release minification is on).
+-keepclassmembers class * {
+    @android.webkit.JavascriptInterface public *;
+}
+-keepattributes JavascriptInterface
+
+# Release builds drop verbose and debug log calls; warnings and errors stay.
+-assumenosideeffects class android.util.Log {
+    public static int v(...);
+    public static int d(...);
+}
 
 # Uncomment this to preserve the line number information for
 # debugging stack traces.

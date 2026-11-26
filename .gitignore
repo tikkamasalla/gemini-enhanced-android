@@ -28,6 +28,7 @@ captures/
 *.apk
 *.aab
 
-# AI 工具的本機設定
-.claude/
-__pycache__/
+# 簽名金鑰
+*.jks
+*.keystore
+keystore.properties

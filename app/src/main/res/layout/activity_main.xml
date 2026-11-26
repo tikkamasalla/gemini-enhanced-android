@@ -5,8 +5,12 @@
     android:layout_height="match_parent"
     android:fitsSystemWindows="true">
 
-    <WebView
-        android:id="@+id/chatWebView"
+    <!-- Container for the process-lifetime chat WebView (see ChatHolder).
+         The WebView itself is created once per process and re-attached here,
+         so it is NOT declared in this layout. DrawerWebContainer also hosts
+         the native drawer overlay above the WebView during sidebar drags. -->
+    <com.tikkamasalla.geminienhanced.DrawerWebContainer
+        android:id="@+id/webContainer"
         android:layout_width="match_parent"
         android:layout_height="match_parent" />
 

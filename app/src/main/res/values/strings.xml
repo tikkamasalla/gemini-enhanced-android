@@ -1,11 +1,9 @@
 <resources>
-    <string name="app_name" translatable="false">geminiAssist</string>
+    <string name="app_name" translatable="false">Gemini Enhanced</string>
     <string name="error_copy">Please select and copy text manually</string>
-    <!-- StarDialog -->
+    <!-- Dialog buttons -->
     <string name="dialog_OK_button">OK</string>
     <string name="dialog_NO_button">No</string>
-    <string name="dialog_Later_button">Maybe later</string>
-    <string name="dialog_StarOnGitHub">Do you like this app? Please give a star on GitHub.</string>
     <string name="download">Download started:</string>
     <string name="download_saved">Saved to Downloads:</string>
     <string name="download_failed">Download failed</string>
@@ -18,4 +16,8 @@
     <string name="reset_chat_confirm">This clears cookies, cache and site data, and signs you out. Continue?</string>
     <string name="reset_chat_done">Chat reset</string>
     <string name="mic_permission_denied">Microphone permission denied</string>
+    <string name="replying_title">Gemini is replying…</string>
+    <string name="replying_text">Keeping the reply streaming</string>
+    <string name="replied_title">Gemini replied</string>
+    <string name="replied_text">Your reply is ready</string>
 </resources>

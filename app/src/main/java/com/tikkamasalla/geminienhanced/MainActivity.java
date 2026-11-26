@@ -11,7 +11,7 @@ GNU General Public License for more details.
 You should have received a copy of the GNU General Public License
 along with this program.  If not, see <https://www.gnu.org/licenses/>.
 */
-package io.github.acidefluorhydrique.geminiassist;
+package com.tikkamasalla.geminienhanced;
 
 import static android.webkit.WebView.HitTestResult.IMAGE_TYPE;
 import static android.webkit.WebView.HitTestResult.SRC_ANCHOR_TYPE;
@@ -48,6 +48,7 @@ import android.view.ContextMenu;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
+import android.view.ViewGroup;
 import android.view.ViewConfiguration;
 import android.view.Window;
 import android.view.WindowManager;
@@ -63,6 +64,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebStorage;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
 import android.widget.ImageButton;
 import android.widget.Toast;
 import android.webkit.ValueCallback;
@@ -73,29 +75,41 @@ import androidx.webkit.WebViewCompat;
 import androidx.webkit.WebViewFeature;
 
 import org.json.JSONObject;
-import org.woheller69.freeDroidWarn.FreeDroidWarn;
 
 
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.Date;
 import java.util.Locale;
+import java.util.Map;
+import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
 
     private WebView chatWebView = null;
+    private DrawerWebContainer webContainer = null;
+    private NativeSidebar sidebar = null;  // native sidebar (drawer wiring)
     private ImageButton restrictedButton = null;
     private WebSettings chatWebSettings = null;
     private CookieManager chatCookieManager = null;
     private final Context context = this;
-    private SwipeTouchListener swipeTouchListener;
-    private String TAG ="geminiAssist";
+    private static final String TAG = "GeminiEnhanced";
     private String urlToLoad = "https://gemini.google.com/";
+    // The started (visible) instance, if any. An instance only clears its
+    // own entry, so a late onStop of an older instance cannot hide a newer one.
+    private static volatile MainActivity visibleActivity = null;
+    //Last opened chat, for reopening it on a cold start.
+    private static final String PREF_LAST_CHAT_URL = "lastChatUrl";
+    private static final Pattern CHAT_URL_PATTERN =
+            Pattern.compile("^https://gemini\\.google\\.com/app/[A-Za-z0-9_-]+");
+    private static final int NOTIFICATION_PERMISSION_REQUEST_CODE = 102;
     private static boolean restricted = true;
     private boolean buttonDragging = false;  //the user is moving the button, do not snap it back on layout
 
@@ -114,7 +128,6 @@ public class MainActivity extends Activity {
     @Override
     protected void onPause() {
         if (chatCookieManager!=null) chatCookieManager.flush();
-        swipeTouchListener = null;
         super.onPause();
     }
 
@@ -152,25 +165,13 @@ public class MainActivity extends Activity {
             return true;
         });
 
-        swipeTouchListener = new SwipeTouchListener(context) {
-            public void onSwipeBottom() {
-                if (!chatWebView.canScrollVertically(0)) {
-                    setButtonHidden(false);
-                }
-            }
-            public void onSwipeTop(){
-                    setButtonHidden(true);
-            }
-        };
-
-        chatWebView.setOnTouchListener(swipeTouchListener);
     }
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         //Remember the last mode and whether the button was hidden; a fresh install starts restricted
         SharedPreferences prefs = PreferenceManager.getDefaultSharedPreferences(this);
-        restricted = prefs.getBoolean("restricted", true);
+        restricted = true; // always Gemini-only (the toggle button is hidden: it covered the menu and a long press reset the chat)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             setTheme(android.R.style.Theme_DeviceDefault_DayNight);
         }
@@ -179,22 +180,62 @@ public class MainActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        //Create the WebView
-        chatWebView = findViewById(R.id.chatWebView);
-        registerForContextMenu(chatWebView);
+        webContainer = findViewById(R.id.webContainer);
         restrictedButton = findViewById(R.id.restricted);
+        restrictedButton.setVisibility(View.GONE);
         makeButtonDraggable();
         if (prefs.getBoolean("buttonHidden", false)) restrictedButton.setVisibility(View.GONE);
+
+        //Restrict what gets loaded (the allowed-domain list itself is unchanged)
+        initURLs();
+
+        //The chat WebView lives for the whole process (see ChatHolder) so a
+        //reply keeps streaming without the Activity. Re-attach it if it
+        //already exists and do NOT reload; otherwise create and load it.
+        boolean firstCreation = !ChatHolder.hasWebView();
+        chatWebView = ChatHolder.getOrCreate(this);
+        ChatHolder.attachActivity(this);
+        // If the reply was streaming off-screen, take the WebView back now;
+        // the teardown below re-attaches it to the layout.
+        ChatHolder.takeBackTo(this);
+        if (chatWebView.getParent() instanceof ViewGroup) {
+            ((ViewGroup) chatWebView.getParent()).removeView(chatWebView);
+        }
+        webContainer.addView(chatWebView,
+                new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT));
+        // ---- drawer wiring: the native sidebar lives above the WebView in
+        // webContainer, which keeps it on top whenever the WebView is re-attached.
+        try {
+            sidebar = new NativeSidebar(this);
+            webContainer.setSidebar(sidebar);
+        } catch (Exception e) {
+            Log.w(TAG, "[sidebar] setup failed", e);
+        }
+        // ---- end drawer wiring
+        registerForContextMenu(chatWebView);
 
         //Set cookie options
         chatCookieManager = CookieManager.getInstance();
         chatCookieManager.setAcceptCookie(true);
         chatCookieManager.setAcceptThirdPartyCookies(chatWebView, false);
+        chatWebSettings = chatWebView.getSettings();
 
-        //Restrict what gets loaded
-        initURLs();
-        registerForContextMenu(chatWebView);
+        attachWebViewClients();
+        if (firstCreation) {
+            initProcessWebView();
+            //Cold start: reopen the last chat, fall back to the start page.
+            chatWebView.loadUrl(startUrl(prefs));
+        }
+        //else: a live WebView is already showing the chat; do NOT reload.
 
+        askForNotificationsOnce(prefs);
+    }
+
+    // (Re)set on every attach: these touch the current Activity, so they
+    // must not outlive it on the process-lifetime WebView.
+    private void attachWebViewClients() {
         chatWebView.setWebChromeClient(new WebChromeClient(){
             @Override
             public boolean onConsoleMessage(ConsoleMessage consoleMessage) {
@@ -253,11 +294,14 @@ public class MainActivity extends Activity {
                 if (request.getUrl().toString().equals("about:blank")) {
                     return null;
                 }
+                if (isAllowedBlob(request.getUrl().toString())) {
+                    return null;
+                }
                 if (!request.getUrl().toString().startsWith("https://")) {
-                    Log.d(TAG, "[shouldInterceptRequest][NON-HTTPS] Blocked access to " + request.getUrl().toString());
+                    Log.d(TAG, "[shouldInterceptRequest][NON-HTTPS] Blocked a " + request.getUrl().getScheme() + " request");
                     return new WebResourceResponse("text/javascript", "UTF-8", null); //Deny URLs that aren't HTTPS
                 }
-                if (!isAllowed(request.getUrl().getHost())) {
+                if (!isAllowed(request.getUrl().getHost()) && !isSandboxCdnRequest(request)) {
                     Log.d(TAG, "[shouldInterceptRequest][NOT ON ALLOWLIST] Blocked access to " + request.getUrl().getHost());
                     return new WebResourceResponse("text/javascript", "UTF-8", null); //Deny URLs not on ALLOWLIST
                 }
@@ -271,9 +315,12 @@ public class MainActivity extends Activity {
                 if (request.getUrl().toString().equals("about:blank")) {
                     return false;
                 }
+                if (isAllowedBlob(request.getUrl().toString())) {
+                    return false;
+                }
                 if (!request.getUrl().toString().startsWith("https://")) {
                     if (isLinkTap(request)) return openInBrowser(request.getUrl());
-                    Log.d(TAG, "[shouldOverrideUrlLoading][NON-HTTPS] Blocked access to " + request.getUrl().toString());
+                    Log.d(TAG, "[shouldOverrideUrlLoading][NON-HTTPS] Blocked a " + request.getUrl().getScheme() + " link");
                     return true; //Deny URLs that aren't HTTPS
                 }
                 if (!isAllowed(request.getUrl().getHost())) {
@@ -289,8 +336,42 @@ public class MainActivity extends Activity {
             @Override
             public void onReceivedError(WebView view, WebResourceRequest request, WebResourceError error) {
                 if (request != null && request.isForMainFrame()) {
-                    Log.w(TAG, "[onReceivedError] " + error.getErrorCode() + ": " + error.getDescription() + " @ " + request.getUrl());
+                    Log.w(TAG, "[onReceivedError] " + error.getErrorCode() + ": " + error.getDescription() + " @ " + request.getUrl().getHost());
                 }
+            }
+
+            @Override
+            public void onPageFinished(WebView view, String url) {
+                super.onPageFinished(view, url);
+                // Busy ("Gemini is replying") detection: DOM stop-button
+                // check (MutationObserver + 500 ms interval + 2 s debounce,
+                // plus a 10 s heartbeat).
+                view.evaluateJavascript(ReplyWatch.buildInjectorJs(), null);
+                // ---- drawer wiring: sidebar.js feeds the native sidebar
+                // (installed once per page, guard flag).
+                injectSidebarJs(view);
+            }
+
+            // The renderer died (crash or killed for memory). Returning true
+            // keeps the app alive; the dead WebView is dropped and, if this
+            // Activity is still around, rebuilt with the last chat instead
+            // of leaving a blank page.
+            @Override
+            public boolean onRenderProcessGone(WebView view, android.webkit.RenderProcessGoneDetail detail) {
+                boolean crashed = Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && detail != null && detail.didCrash();
+                Log.w(TAG, "renderer gone (crash=" + crashed + "), rebuilding the chat page");
+                ChatHolder.dropDead(view, getApplicationContext());
+                ReplyKeeperService.cancel(getApplicationContext());
+                if (view == chatWebView && !isFinishing() && !isDestroyed()) {
+                    recreate();
+                }
+                return true;
+            }
+
+            @Override
+            public void doUpdateVisitedHistory(WebView view, String url, boolean isReload) {
+                super.doUpdateVisitedHistory(view, url, isReload);
+                saveChatUrlIfAny(url);
             }
         });
 
@@ -300,7 +381,7 @@ public class MainActivity extends Activity {
                 return;
             }
             Uri source = Uri.parse(url);
-            Log.d(TAG,"DownloadManager: " + url);
+            Log.d(TAG,"DownloadManager: " + source.getHost());
             DownloadManager.Request request = new DownloadManager.Request(source);
             request.addRequestHeader("Cookie", CookieManager.getInstance().getCookie(url));
             request.addRequestHeader("Accept", "text/html, application/xhtml+xml, *" + "/" + "*");
@@ -315,11 +396,20 @@ public class MainActivity extends Activity {
             assert dm != null;
             dm.enqueue(request);
         });
+    }
 
+    // Runs once per process, before the first load. Must not reference the
+    // Activity (the WebView outlives it); the message callback below only
+    // calls static methods for that reason.
+    private void initProcessWebView() {
         //Bridge used by downloadBlob(). Only the Gemini origin can post to it, even in unrestricted mode.
         if (WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
             WebViewCompat.addWebMessageListener(chatWebView, DOWNLOAD_JS_OBJECT, Collections.singleton(GEMINI_ORIGIN),
-                    (view, message, sourceOrigin, isMainFrame, replyProxy) -> onBlobReceived(message.getData()));
+                    (view, message, sourceOrigin, isMainFrame, replyProxy) -> {
+                        WebView w = (WebView) view;
+                        String data = message.getData();
+                        w.post(() -> onBlobReceived(w.getContext().getApplicationContext(), w, data));
+                    });
         }
         //Pages often revoke a blob URL right after starting the download, before downloadBlob() can read it
         if (WebViewFeature.isFeatureSupported(WebViewFeature.DOCUMENT_START_SCRIPT)) {
@@ -347,14 +437,133 @@ public class MainActivity extends Activity {
         chatWebSettings.setGeolocationEnabled(false);
         chatWebSettings.setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
 
-        //Load ChatGPT
-        chatWebView.loadUrl(urlToLoad);
-        FreeDroidWarn.showWarningOnUpgrade(this, BuildConfig.VERSION_CODE);
-        if (GithubStar.shouldShowStarDialog(this)) GithubStar.starDialog(this,"https://github.com/acidefluorhydrique/geminiAssist");
+        chatWebView.addJavascriptInterface(new ReplyWatch(getApplicationContext()), "ReplyWatch");
+        // ---- drawer wiring: data bridge of the native sidebar (sidebar.js)
+        chatWebView.addJavascriptInterface(new SidebarBridge(), SidebarBridge.NAME);
+    }
+
+    // ---- drawer wiring: read app/src/main/assets/sidebar.js and run it once
+    // per page after load (the script itself guards against double install).
+    private void injectSidebarJs(WebView view) {
+        try {
+            InputStream in = getAssets().open("sidebar.js");
+            ByteArrayOutputStream out = new ByteArrayOutputStream();
+            byte[] buf = new byte[4096];
+            int n;
+            while ((n = in.read(buf)) != -1) out.write(buf, 0, n);
+            in.close();
+            view.evaluateJavascript(out.toString("UTF-8"), null);
+        } catch (Exception e) {
+            Log.e(TAG, "[sidebar] inject failed", e);
+        }
+    }
+
+    //Cold start URL: reopen the last chat, fall back to the start page.
+    private String startUrl(SharedPreferences prefs) {
+        String saved = prefs.getString(PREF_LAST_CHAT_URL, null);
+        return saved != null ? saved : urlToLoad;
+    }
+
+    private void saveChatUrlIfAny(String url) {
+        if (url != null && CHAT_URL_PATTERN.matcher(url).find()) {
+            PreferenceManager.getDefaultSharedPreferences(this).edit().putString(PREF_LAST_CHAT_URL, url).apply();
+        }
+    }
+
+    //Android 13+ needs an explicit opt-in for notifications; if refused,
+    //everything else must still work.
+    private void askForNotificationsOnce(SharedPreferences prefs) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU
+                && !prefs.getBoolean("askedNotifications", false)
+                && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
+            prefs.edit().putBoolean("askedNotifications", true).apply();
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, NOTIFICATION_PERMISSION_REQUEST_CODE);
+        }
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        visibleActivity = this;
+        if (chatWebView != ChatHolder.get()) {
+            // The renderer died while away and the WebView was dropped:
+            // build a fresh page with the last chat.
+            Log.d(TAG, "onStart: chat WebView replaced, recreating");
+            recreate();
+            return;
+        }
+        boolean attached = chatWebView != null && chatWebView.getParent() == webContainer;
+        // Take the WebView back into this layout whenever it is not there:
+        // still hosted off-screen, or already released from off-screen
+        // hosting when the reply finished in the background (that left it
+        // with no parent at all: a blank screen on return).
+        if (chatWebView != null && !attached) {
+            ChatHolder.takeBackTo(this);
+            ChatHolder.attachActivity(this);
+            if (chatWebView.getParent() instanceof ViewGroup) {
+                ((ViewGroup) chatWebView.getParent()).removeView(chatWebView);
+            }
+            if (webContainer != null) {
+                webContainer.addView(chatWebView,
+                        new FrameLayout.LayoutParams(
+                                FrameLayout.LayoutParams.MATCH_PARENT,
+                                FrameLayout.LayoutParams.MATCH_PARENT));
+                // A re-attached WebView draws nothing until the page changes
+                // (measured: blank window, page "visible", until the next
+                // stop/start). A hidden->shown cycle makes it send a frame now.
+                final WebView shown = chatWebView;
+                shown.setVisibility(View.INVISIBLE);
+                shown.post(() -> shown.setVisibility(View.VISIBLE));
+                // (drawer wiring: webContainer keeps the native sidebar above
+                // the re-attached WebView by itself)
+            }
+        }
+    }
+
+    @Override
+    protected void onStop() {
+        if (visibleActivity == this) visibleActivity = null;
+        // While a reply is pending or streams, host the WebView off-screen so
+        // the page keeps rendering (and the stop-button check sees it
+        // finish). Only from the instance that shows it, and only when no
+        // other instance has become visible meanwhile.
+        if (chatWebView != null && chatWebView.getParent() == webContainer && visibleActivity == null) {
+            ChatHolder.maybeHostOffscreen(getApplicationContext());
+        }
+        super.onStop();
+    }
+
+    //Whether the Activity is in the foreground; the keeper service uses it
+    //to decide about the "replied" notification.
+    public static boolean isForeground() {
+        return visibleActivity != null;
     }
 
     @Override
     protected void onDestroy() {
+        if (!isChangingConfigurations() && chatWebView != null) {
+            // While a reply streams, host the WebView off-screen instead of
+            // detaching it, so the page keeps rendering. If it is already
+            // hosted (from onStop), leave it there; detaching would break
+            // the Presentation context.
+            boolean mine = chatWebView.getParent() == webContainer;
+            if (mine && visibleActivity == null && ReplyKeeperService.needsKeep()) {
+                ChatHolder.maybeHostOffscreen(getApplicationContext());
+            }
+            // Only let go of the WebView if this instance still holds it: a
+            // late onDestroy of an older instance must not pull it out of
+            // the newer one's layout.
+            if (mine && !ChatHolder.isOffscreen()) {
+                //Detach the process WebView from the layout but do not destroy
+                //it, so a running reply survives. Hand its context back to the app.
+                if (chatWebView.getParent() instanceof ViewGroup) {
+                    ((ViewGroup) chatWebView.getParent()).removeView(chatWebView);
+                }
+                ChatHolder.detachActivity(getApplicationContext());
+            }
+            chatWebView = null;
+        }
+        sidebar = null;  // drawer wiring (the bridge lets go when the view detaches)
         super.onDestroy();
     }
 
@@ -364,6 +573,11 @@ public class MainActivity extends Activity {
         if (event.getAction() == KeyEvent.ACTION_DOWN) {
             switch (keyCode) {
                 case KeyEvent.KEYCODE_BACK:
+                    // ---- drawer wiring: Back closes the open sidebar first
+                    if (webContainer != null && webContainer.isOpen()) {
+                        webContainer.close(true);
+                        return true;
+                    }
                     if (chatWebView.canGoBack() && !chatWebView.getUrl().equals("about:blank")) {
                         chatWebView.goBack();
                     } else {
@@ -377,6 +591,7 @@ public class MainActivity extends Activity {
 
     public void resetChat()  {
 
+        PreferenceManager.getDefaultSharedPreferences(this).edit().remove(PREF_LAST_CHAT_URL).apply();
         chatWebView.clearCache(true);
         chatWebView.clearFormData();
         chatWebView.clearHistory();
@@ -493,7 +708,7 @@ public class MainActivity extends Activity {
     }
 
     private boolean openInBrowser(Uri url) {
-        Log.d(TAG, "[openInBrowser] " + url);
+        Log.d(TAG, "[openInBrowser] " + url.getHost());
         try {
             startActivity(new Intent(Intent.ACTION_VIEW, url));
         } catch (ActivityNotFoundException e) {
@@ -505,7 +720,7 @@ public class MainActivity extends Activity {
     //A blob URL only exists inside the page that created it, so the page reads it and posts the bytes back
     private void downloadBlob(String url, String filename, String mimetype) {
         if (!url.startsWith("blob:" + GEMINI_ORIGIN + "/") || !WebViewFeature.isFeatureSupported(WebViewFeature.WEB_MESSAGE_LISTENER)) {
-            Log.w(TAG, "[downloadBlob] Unsupported blob download: " + url);
+            Log.w(TAG, "[downloadBlob] Unsupported blob download");
             Toast.makeText(context, R.string.download_failed, Toast.LENGTH_SHORT).show();
             return;
         }
@@ -515,7 +730,6 @@ public class MainActivity extends Activity {
             requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, STORAGE_PERMISSION_REQUEST_CODE);
             return;
         }
-        Log.d(TAG, "[downloadBlob] " + url);
         String js = "(function(){" +
                 "var post=function(m){" + DOWNLOAD_JS_OBJECT + ".postMessage(JSON.stringify(m));};" +
                 "fetch(" + JSONObject.quote(url) + ")" +
@@ -531,7 +745,9 @@ public class MainActivity extends Activity {
         chatWebView.evaluateJavascript(js, null);
     }
 
-    private void onBlobReceived(String json) {
+    //Static so the process-lifetime WebView's message listener never holds
+    //an Activity; results are posted back with the view's handler.
+    private static void onBlobReceived(Context appContext, WebView view, String json) {
         new Thread(() -> {  //decoding and writing a large image would block the UI thread
             try {
                 JSONObject blob = new JSONObject(json);
@@ -541,12 +757,12 @@ public class MainActivity extends Activity {
                 byte[] bytes = Base64.decode(data.substring(data.indexOf(',') + 1), Base64.DEFAULT);
                 String filename = blobFilename(blob.optString("name"), mimetype);
                 String saved = Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q
-                        ? saveToMediaStore(bytes, filename, mimetype)
-                        : saveToDownloadsDir(bytes, filename, mimetype);
-                runOnUiThread(() -> Toast.makeText(context, getString(R.string.download_saved) + "\n" + saved, Toast.LENGTH_SHORT).show());
+                        ? saveToMediaStore(appContext, bytes, filename, mimetype)
+                        : saveToDownloadsDir(appContext, bytes, filename, mimetype);
+                view.post(() -> Toast.makeText(appContext, appContext.getString(R.string.download_saved) + "\n" + saved, Toast.LENGTH_SHORT).show());
             } catch (Exception e) {
                 Log.e(TAG, "[onBlobReceived] Saving blob failed", e);
-                runOnUiThread(() -> Toast.makeText(context, R.string.download_failed, Toast.LENGTH_SHORT).show());
+                view.post(() -> Toast.makeText(appContext, appContext.getString(R.string.download_failed), Toast.LENGTH_SHORT).show());
             }
         }).start();
     }
@@ -562,8 +778,8 @@ public class MainActivity extends Activity {
     }
 
     @TargetApi(Build.VERSION_CODES.Q)
-    private String saveToMediaStore(byte[] bytes, String filename, String mimetype) throws IOException {
-        ContentResolver resolver = getContentResolver();
+    private static String saveToMediaStore(Context appContext, byte[] bytes, String filename, String mimetype) throws IOException {
+        ContentResolver resolver = appContext.getContentResolver();
         ContentValues values = new ContentValues();
         values.put(MediaStore.Downloads.DISPLAY_NAME, filename);
         values.put(MediaStore.Downloads.MIME_TYPE, mimetype.isEmpty() ? "application/octet-stream" : mimetype);
@@ -583,7 +799,7 @@ public class MainActivity extends Activity {
         return filename;
     }
 
-    private String saveToDownloadsDir(byte[] bytes, String filename, String mimetype) throws IOException {
+    private static String saveToDownloadsDir(Context appContext, byte[] bytes, String filename, String mimetype) throws IOException {
         File dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS);
         if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot create " + dir);
         int dot = filename.lastIndexOf('.');
@@ -594,7 +810,7 @@ public class MainActivity extends Activity {
         try (FileOutputStream out = new FileOutputStream(file)) {
             out.write(bytes);
         }
-        MediaScannerConnection.scanFile(context, new String[]{file.getAbsolutePath()},
+        MediaScannerConnection.scanFile(appContext, new String[]{file.getAbsolutePath()},
                 mimetype.isEmpty() ? null : new String[]{mimetype}, null);
         return file.getName();
     }
@@ -611,8 +827,53 @@ public class MainActivity extends Activity {
         allowedDomains.add("gstatic.com");            //static assets and fonts
         allowedDomains.add("googleusercontent.com");  //avatars, uploaded and generated images
         allowedDomains.add("googleapis.com");         //backend APIs used by the app
+        allowedDomains.add("scf.usercontent.goog");   //sandboxed iframes for code and HTML previews
         allowedDomains.add("push.clients6.google.com");          //file and image uploads (issue #5)
         allowedDomains.add("geminiweb-pa.clients6.google.com");  //Gemini's own web API, called while uploading
+        allowedDomains.add("waa-pa.clients6.google.com");        //WAA/BotGuard attestation; blocked, replies stalled on the spinner
+        allowedDomains.add("signaler-pa.clients6.google.com");   //WebChannel signaler used by the reply channel
+    }
+
+    //Public CDNs the code/HTML previews load their chart and JS libraries from. NOT in allowedDomains: they are
+    //allowed only for requests that come from a preview sandbox, see isSandboxCdnRequest(). Add a host here only
+    //when a preview is seen requesting it.
+    private static final String[] SANDBOX_CDN_HOSTS = {
+            "cdn.jsdelivr.net",        //libraries loaded by the preview scripts (seen in chat previews)
+            "cdnjs.cloudflare.com",    //libraries loaded by the preview scripts (seen in chat previews)
+    };
+
+    //True when the request goes to one of SANDBOX_CDN_HOSTS AND was made by a page of the preview sandbox
+    //(*.scf.usercontent.goog), judged by its Origin or Referer header. The same CDNs requested by
+    //gemini.google.com itself stay blocked.
+    private static boolean isSandboxCdnRequest(WebResourceRequest request) {
+        if (!isCdnHost(request.getUrl().getHost())) return false;
+        Map<String, String> h = request.getRequestHeaders();
+        if (h == null) return false;
+        for (String name : new String[]{"Origin", "Referer"}) {
+            String v = null;
+            for (Map.Entry<String, String> e : h.entrySet()) {
+                if (name.equalsIgnoreCase(e.getKey())) { v = e.getValue(); break; }
+            }
+            if (v == null) continue;
+            String host = Uri.parse(v).getHost();
+            if (host != null && host.endsWith(".scf.usercontent.goog")) return true;
+        }
+        return false;
+    }
+
+    private static boolean isCdnHost(String host) {
+        if (host == null) return false;
+        for (String cdn : SANDBOX_CDN_HOSTS) {
+            if (host.equals(cdn)) return true;
+        }
+        return false;
+    }
+
+    //The preview iframes navigate themselves to blob:https://<sandbox host>/<uuid>. A blob URL is only
+    //ever created by a page of the origin named in it, so allow it when that origin is on the list.
+    private static boolean isAllowedBlob(String url) {
+        if (url == null || !url.startsWith("blob:https://")) return false;
+        return isAllowed(Uri.parse(url.substring(5)).getHost());
     }
 
     private static boolean isAllowed(String host) {
@@ -707,11 +968,6 @@ public class MainActivity extends Activity {
         return userAgent.replace("; wv", "").replaceAll("Version/[\\d.]+\\s", "");
     }
 
-    private void setButtonHidden(boolean hidden) {
-        restrictedButton.setVisibility(hidden ? View.GONE : View.VISIBLE);
-        PreferenceManager.getDefaultSharedPreferences(context).edit().putBoolean("buttonHidden", hidden).apply();
-    }
-
     @Override
     public void onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults);
@@ -725,6 +981,9 @@ public class MainActivity extends Activity {
             if (!granted) {
                 Toast.makeText(context, R.string.mic_permission_denied, Toast.LENGTH_SHORT).show();
             }
+        }
+        if (requestCode == NOTIFICATION_PERMISSION_REQUEST_CODE) {
+            return;  //optional; everything else works without notifications too
         }
         if (requestCode == STORAGE_PERMISSION_REQUEST_CODE) {
             String[] download = pendingBlobDownload;
