@@ -1,6 +1,18 @@
-geminiAssist is a simple WebView wrapper for Google Gemini. It blocks all URLs that are not essential for functioning.
+Gemini Enhanced is an unofficial Android app for Google Gemini. It shows the Gemini web app in a WebView and adds a native chat sidebar, replies that finish after you leave the app, and a strict allow list for network requests.
 
-You can switch on/off blocking by clicking the button at the top right.
-If signing in gets stuck (for example at 2-step verification), switch blocking off, sign in, then switch it back on.
-Swipe up a bit to hide the button.
-Long press the button to reset the chat. This clears cookies, cache and site data, and signs you out.
+Features:
+* Native sidebar with your chats, opened with a swipe from anywhere or with the menu button. It follows your finger, shows pinned chats and the open chat, and appears at once on start from a local cache.
+* Replies keep streaming when you switch apps, turn the screen off or swipe the app away. A notification shows while Gemini is replying and tells you when the reply is ready.
+* Opens the chat you had open last.
+* No blank or black screen when you come back to the app. If the page crashes, it is rebuilt with your chat.
+* Near zero CPU use while idle.
+* Code and HTML previews work, including the chart and script libraries they load.
+* Saves generated images to Downloads.
+* Phones get the mobile layout, tablets the desktop layout.
+
+Privacy:
+* Only Google hosts that Gemini needs are allowed. Every other request is blocked, and plain HTTP is never loaded.
+* Links to other sites open in your browser.
+* No analytics, no ads, no trackers. WebView usage reporting is off and app backup is off.
+
+This app is not affiliated with Google. You need a Google account to use Gemini.

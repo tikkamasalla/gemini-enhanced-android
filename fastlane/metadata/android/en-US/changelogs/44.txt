@@ -1,0 +1,8 @@
+First release as Gemini Enhanced.
+* Native chat sidebar with swipe to open, pinned chats and a local cache.
+* Replies finish in the background, with a notification when they are ready.
+* Reopens the last chat on start.
+* Fixes for blank and black screens when returning to the app.
+* Near zero CPU use while idle.
+* Code and HTML previews work.
+* New app icon and app id.

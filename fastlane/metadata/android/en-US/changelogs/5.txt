@@ -1,6 +1,0 @@
-The block button can now be dragged anywhere, so it no longer covers Gemini's temporary chat button. Its position is remembered.
-Sign-in cookies and site data are excluded from Android backups and device transfers.
-Cleartext (HTTP) and mixed content are always blocked.
-Attaching a file no longer asks for the storage permission.
-Long pressing a link no longer shows a debug message; links behind images are copied correctly.
-The "microphone permission denied" message is now translated.

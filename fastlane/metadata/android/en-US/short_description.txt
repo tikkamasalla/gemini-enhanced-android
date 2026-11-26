@@ -1,1 +1,1 @@
-WebView wrapper for Google Gemini
+Gemini for Android with a native sidebar, background replies and an allow list
